@@ -1338,7 +1338,20 @@ export function buildBatchNodeOptionsPrefix(shellPath: string, preloadPath: stri
   return `NODE_OPTIONS=${quotePosixSingle(option)} `;
 }
 
-function formatCommandOutput(label: string, raw: string, onFsBytes?: (bytes: number) => void): string {
+/**
+ * Per-section budget for the echoed `$ <command>` line so a 50KB heredoc
+ * payload cannot dominate the response body. The full command always reaches
+ * the executor — only the echo is clipped (Issues #717 + #736).
+ */
+const COMMAND_ECHO_MAX = 500;
+
+function truncateCommandForEcho(command: string): string {
+  const cleaned = command.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= COMMAND_ECHO_MAX) return cleaned;
+  return cleaned.slice(0, COMMAND_ECHO_MAX) + "…";
+}
+
+function formatCommandOutput(label: string, command: string, raw: string, onFsBytes?: (bytes: number) => void): string {
   let output = raw || "(no output)";
   const fsMatches = output.matchAll(/__CM_FS__:(\d+)/g);
   let cmdFsBytes = 0;
@@ -1347,7 +1360,11 @@ function formatCommandOutput(label: string, raw: string, onFsBytes?: (bytes: num
     onFsBytes?.(cmdFsBytes);
     output = output.replace(/__CM_FS__:\d+\n?/g, "");
   }
-  return `# ${label}\n\n${output}\n`;
+  // Echo the executed command below the section heading so per-chunk
+  // indexed content retains provenance for later ctx_search hits
+  // (Issues #717 + #736).
+  const echoed = truncateCommandForEcho(command);
+  return `# ${label}\n\n$ ${echoed}\n\n${output}\n`;
 }
 
 function combineExecOutput(result: { stdout?: string; stderr?: string }): string {
@@ -1397,7 +1414,7 @@ export async function runBatchCommands(
         code: `${nodeOptsPrefix}${cmd.command}`,
         timeout: perCmdTimeout,
       });
-      outputs.push(formatCommandOutput(cmd.label, combineExecOutput(result), onFsBytes));
+      outputs.push(formatCommandOutput(cmd.label, cmd.command, combineExecOutput(result), onFsBytes));
       if (result.timedOut) {
         timedOut = true;
         for (let j = i + 1; j < commands.length; j++) {
@@ -1421,7 +1438,7 @@ export async function runBatchCommands(
       });
       // Always route partial output through formatCommandOutput so __CM_FS__
       // markers are stripped + counted, even when the command timed out.
-      const formatted = formatCommandOutput(cmd.label, combineExecOutput(result), onFsBytes);
+      const formatted = formatCommandOutput(cmd.label, cmd.command, combineExecOutput(result), onFsBytes);
       const output = result.timedOut
         ? formatted.replace(/\n$/, "") + `\n(timed out after ${timeout ?? "?"}ms)\n`
         : formatted;
