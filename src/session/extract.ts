@@ -1745,6 +1745,7 @@ export function extractUserEvents(message: string): SessionEvent[] {
     const events: SessionEvent[] = [];
 
     events.push(...extractUserPlan(message));
+    events.push(...extractUserPromptFeatures(message));
     events.push(...extractUserDecision(message));
     events.push(...extractRole(message));
     events.push(...extractIntent(message));
@@ -1756,6 +1757,78 @@ export function extractUserEvents(message: string): SessionEvent[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Algorithmic language classifier — no regex. Distinguishes Latin script
+ * (incl. Latin-1, Extended-A/B for Turkish/German/etc.) from other scripts
+ * (CJK, Cyrillic, Arabic, Hebrew, Devanagari…). Returns "mixed" when both
+ * present, "latin" when neither has letters (digits/punctuation only).
+ */
+function classifyLanguage(message: string): "latin" | "non-latin" | "mixed" {
+  let latinCount = 0;
+  let nonLatinCount = 0;
+  for (const ch of message) {
+    const c = ch.codePointAt(0)!;
+    if (
+      (c >= 0x41 && c <= 0x5A) ||
+      (c >= 0x61 && c <= 0x7A) ||
+      (c >= 0xC0 && c <= 0xFF) ||
+      (c >= 0x100 && c <= 0x24F)
+    ) {
+      latinCount++;
+    } else if (c >= 0x370 && c <= 0x1CFF) {
+      nonLatinCount++;
+    } else if (c >= 0x2E80 && c <= 0x9FFF) {
+      nonLatinCount++;
+    } else if (c >= 0xA000 && c <= 0xD7FF) {
+      nonLatinCount++;
+    } else if (c >= 0x10000) {
+      nonLatinCount++;
+    }
+  }
+  if (latinCount > 0 && nonLatinCount === 0) return "latin";
+  if (nonLatinCount > 0 && latinCount === 0) return "non-latin";
+  if (latinCount === 0 && nonLatinCount === 0) return "latin";
+  return "mixed";
+}
+
+/**
+ * Privacy-aware prompt-feature extractor (Issue #9).
+ *
+ * Captures AGGREGATE features only — length bucket, language script,
+ * question/imperative shape, presence of code fence, presence of URL.
+ * The raw prompt text is NEVER stored in the emitted event.
+ *
+ * Length buckets (chars): xs <10, s <50, m <200, l <800, xl >=800.
+ */
+function extractUserPromptFeatures(message: string): SessionEvent[] {
+  if (typeof message !== "string" || message.length === 0) return [];
+
+  const len = message.length;
+  let lengthBucket: string;
+  if (len < 10) lengthBucket = "xs";
+  else if (len < 50) lengthBucket = "s";
+  else if (len < 200) lengthBucket = "m";
+  else if (len < 800) lengthBucket = "l";
+  else lengthBucket = "xl";
+
+  const lang = classifyLanguage(message);
+  const shape = message.includes("?") ? "question" : "imperative";
+  const codeFence = message.includes("```");
+  const hasUrl =
+    message.includes("http://") || message.includes("https://");
+
+  const data =
+    `length:${lengthBucket} lang:${lang} shape:${shape} ` +
+    `codeFence:${codeFence} url:${hasUrl}`;
+
+  return [{
+    type: "prompt_features",
+    category: "data",
+    data: safeString(data),
+    priority: 3,
+  }];
 }
 
 /**
